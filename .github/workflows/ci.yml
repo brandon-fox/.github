@@ -63,3 +63,7 @@ jobs:
           done < pins.txt
           echo "Checked $(wc -l < pins.txt) pinned actions"
           exit "$missing"
+
+  pr-size:
+    if: github.event_name == 'pull_request'
+    uses: ./.github/workflows/pr-size-guard.yml

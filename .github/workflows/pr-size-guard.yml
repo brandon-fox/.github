@@ -1,0 +1,93 @@
+name: PR Size Guard (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      soft-limit:
+        description: Recommended target PR size ceiling (lines changed).
+        required: false
+        type: number
+        default: 400
+      hard-limit:
+        description: Hard PR size limit (lines changed) before failing CI.
+        required: false
+        type: number
+        default: 1000
+
+jobs:
+  pr-size:
+    name: PR Size Guard (<=${{ inputs.hard-limit }} lines)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Measure PR diff size (excluding lockfiles)
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.0.1
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            if (!pr) {
+              core.info('Not a pull_request event; skipping.');
+              return;
+            }
+
+            const lockfiles = new Set([
+              'uv.lock',
+              'package-lock.json',
+              'Cargo.lock',
+              'poetry.lock',
+              'pnpm-lock.yaml',
+              'yarn.lock',
+            ]);
+
+            const files = await github.paginate(github.rest.pulls.listFiles, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: pr.number,
+              per_page: 100,
+            });
+
+            let countedLines = 0;
+            let excludedLines = 0;
+            for (const f of files) {
+              const base = f.filename.split('/').pop();
+              const delta = (f.additions || 0) + (f.deletions || 0);
+              if (lockfiles.has(base)) {
+                excludedLines += delta;
+              } else {
+                countedLines += delta;
+              }
+            }
+
+            const soft = Number(${{ inputs.soft-limit }});
+            const hard = Number(${{ inputs.hard-limit }});
+
+            await core.summary
+              .addHeading(`PR #${pr.number} Size Check`, 3)
+              .addTable([
+                [
+                  { data: 'Metric', header: true },
+                  { data: 'Value', header: true },
+                ],
+                ['Counted lines (code, tests, docs)', String(countedLines)],
+                ['Excluded lockfile lines', String(excludedLines)],
+                ['Target ceiling (soft)', `<= ${soft}`],
+                ['Hard limit', `<= ${hard}`],
+              ])
+              .write();
+
+            if (countedLines > hard) {
+              core.setFailed(
+                `PR #${pr.number} changes ${countedLines} non-lockfile lines, exceeding the hard limit of ${hard} lines. Split into smaller PRs.`
+              );
+            } else if (countedLines > soft) {
+              core.warning(
+                `PR #${pr.number} changes ${countedLines} non-lockfile lines (above ${soft}-line target, within ${hard}-line hard limit).`
+              );
+            } else {
+              core.notice(
+                `PR #${pr.number} changes ${countedLines} non-lockfile lines (within ${soft}-line target).`
+              );
+            }

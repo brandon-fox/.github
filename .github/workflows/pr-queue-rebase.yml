@@ -1,0 +1,115 @@
+name: PR Queue Rebase & Auto-Merge (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      mode:
+        description: "'auto-merge' (on PR events) or 'rebase-next' (on push to main)."
+        required: true
+        type: string
+      merge-method:
+        description: "Linear merge method: 'squash' or 'rebase'."
+        required: false
+        type: string
+        default: 'squash'
+    secrets:
+      token:
+        description: Optional PAT/App token so rebased branches re-trigger PR workflows on strict repos.
+        required: false
+
+jobs:
+  enable-auto-merge:
+    name: Enable Auto-Merge
+    if: inputs.mode == 'auto-merge' && github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Check eligibility and enable auto-merge
+        env:
+          GH_TOKEN: ${{ secrets.token || github.token }}
+          MERGE_METHOD: ${{ inputs.merge-method }}
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.0.1
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            if (!pr) return;
+
+            if (pr.draft) {
+              core.info(`PR #${pr.number} is a draft; skipping auto-merge.`);
+              return;
+            }
+            const labels = (pr.labels || []).map(l => l.name);
+            const hold = labels.filter(l => l === 'wip' || l === 'do-not-merge');
+            if (hold.length > 0) {
+              core.info(`PR #${pr.number} has hold label(s): ${hold.join(', ')}; skipping.`);
+              return;
+            }
+
+            const flag = process.env.MERGE_METHOD === 'rebase' ? '--rebase' : '--squash';
+            await exec.exec('gh', [
+              'pr', 'merge', String(pr.number),
+              '--auto', flag, '--delete-branch',
+              '--repo', `${context.repo.owner}/${context.repo.repo}`,
+            ]);
+
+  rebase-next:
+    name: Rebase Next Behind PR (Serialized)
+    if: inputs.mode == 'rebase-next' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Rebase single next behind PR onto main
+        env:
+          GH_TOKEN: ${{ secrets.token || github.token }}
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.0.1
+        with:
+          script: |
+            const { data: prs } = await github.rest.pulls.list({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              base: 'main',
+              sort: 'created',
+              direction: 'asc',
+              per_page: 30,
+            });
+
+            // Prioritize PRs with auto_merge enabled, oldest first, excluding drafts/hold labels.
+            const candidates = [];
+            for (const summary of prs) {
+              if (summary.draft) continue;
+              const labels = (summary.labels || []).map(l => l.name);
+              if (labels.includes('wip') || labels.includes('do-not-merge')) continue;
+
+              const { data: pr } = await github.rest.pulls.get({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: summary.number,
+              });
+              if (pr.mergeable_state === 'behind') {
+                candidates.push(pr);
+              }
+            }
+
+            if (candidates.length === 0) {
+              core.info('No behind PRs need rebasing.');
+              return;
+            }
+
+            candidates.sort((a, b) => Number(Boolean(b.auto_merge)) - Number(Boolean(a.auto_merge)));
+            const next = candidates[0];
+            core.info(
+              `Rebasing PR #${next.number} (${next.head.ref}) onto main (1 of ${candidates.length} behind PRs to avoid CI oversaturation).`
+            );
+
+            await exec.exec('gh', [
+              'pr', 'update-branch', String(next.number),
+              '--rebase',
+              '--repo', `${context.repo.owner}/${context.repo.repo}`,
+            ]);
