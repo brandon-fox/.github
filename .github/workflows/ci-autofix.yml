@@ -1,0 +1,216 @@
+name: CI Auto-Fix (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      pr-number:
+        description: Pull request number to inspect and fix (resolved automatically from workflow_run if omitted).
+        required: false
+        type: number
+        default: 0
+      mode:
+        description: "'sub-pr' (open, verify, and merge autofix PR into failing PR branch) or 'direct' (push commit to PR branch)."
+        required: false
+        type: string
+        default: 'sub-pr'
+      max-attempts:
+        description: Maximum autofix commits allowed per PR to prevent infinite loops.
+        required: false
+        type: number
+        default: 2
+      fix-python:
+        required: false
+        type: boolean
+        default: true
+      fix-uv-lock:
+        required: false
+        type: boolean
+        default: true
+      fix-rust:
+        required: false
+        type: boolean
+        default: true
+      python-paths:
+        required: false
+        type: string
+        default: '.'
+      extras:
+        required: false
+        type: string
+        default: 'dev'
+      rust-manifest:
+        required: false
+        type: string
+        default: 'Cargo.toml'
+    secrets:
+      token:
+        description: Optional PAT/App token so cascading merges re-trigger PR workflows.
+        required: false
+
+jobs:
+  autofix:
+    name: Auto-fix lint, format & lockfile
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Resolve and validate target PR
+        id: target
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.0.1
+        with:
+          script: |
+            let prNumber = Number(${{ inputs.pr-number }});
+            if (!prNumber && context.payload.workflow_run) {
+              const wr = context.payload.workflow_run;
+              const prs = wr.pull_requests || [];
+              if (prs.length > 0) {
+                prNumber = prs[0].number;
+              } else {
+                const { data: openPrs } = await github.rest.pulls.list({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  state: 'open',
+                  per_page: 30,
+                });
+                const match = openPrs.find(p => p.head.sha === wr.head_sha);
+                if (match) prNumber = match.number;
+              }
+            }
+
+            if (!prNumber) {
+              core.info('No matching open PR found; skipping autofix.');
+              core.setOutput('eligible', 'false');
+              return;
+            }
+
+            const { data: pr } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: prNumber,
+            });
+
+            if (pr.state !== 'open' || pr.draft) {
+              core.info(`PR #${prNumber} is closed or draft; skipping.`);
+              core.setOutput('eligible', 'false');
+              return;
+            }
+            if (!pr.head.repo || pr.head.repo.full_name !== `${context.repo.owner}/${context.repo.repo}`) {
+              core.info(`PR #${prNumber} is from a fork; skipping for security.`);
+              core.setOutput('eligible', 'false');
+              return;
+            }
+            if (pr.head.ref.startsWith('autofix/') || pr.head.ref.startsWith('dependabot/')) {
+              core.info(`PR #${prNumber} branch (${pr.head.ref}) is bot-managed; skipping.`);
+              core.setOutput('eligible', 'false');
+              return;
+            }
+            const labels = (pr.labels || []).map(l => l.name);
+            if (labels.includes('wip') || labels.includes('do-not-merge') || labels.includes('no-autofix')) {
+              core.info(`PR #${prNumber} has hold label; skipping.`);
+              core.setOutput('eligible', 'false');
+              return;
+            }
+
+            const { data: commits } = await github.rest.pulls.listCommits({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: prNumber,
+              per_page: 50,
+            });
+            const autofixCount = commits.filter(c =>
+              c.commit.message.startsWith('style(autofix):')
+            ).length;
+            const maxAttempts = Number(${{ inputs.max-attempts }});
+            if (autofixCount >= maxAttempts) {
+              core.warning(`PR #${prNumber} already has ${autofixCount} autofix commit(s) (max ${maxAttempts}); stopping to prevent loops.`);
+              core.setOutput('eligible', 'false');
+              return;
+            }
+
+            core.setOutput('eligible', 'true');
+            core.setOutput('pr_number', String(prNumber));
+            core.setOutput('head_ref', pr.head.ref);
+
+      - name: Checkout PR branch
+        if: steps.target.outputs.eligible == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.target.outputs.head_ref }}
+          token: ${{ secrets.token || github.token }}
+          fetch-depth: 2
+
+      - name: Run auto-fixers
+        if: steps.target.outputs.eligible == 'true'
+        uses: brandon-fox/.github/.github/actions/run-autofixers@main
+        with:
+          fix-python: ${{ inputs.fix-python }}
+          fix-uv-lock: ${{ inputs.fix-uv-lock }}
+          fix-rust: ${{ inputs.fix-rust }}
+          python-paths: ${{ inputs.python-paths }}
+          extras: ${{ inputs.extras }}
+          rust-manifest: ${{ inputs.rust-manifest }}
+
+      - name: Check for changes and verify fixes
+        if: steps.target.outputs.eligible == 'true'
+        id: diff
+        run: |
+          set -euo pipefail
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "No auto-fixable changes detected."
+            exit 0
+          fi
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+          # Verify deterministic checks pass after fixing before pushing/merging
+          if [ "${{ inputs.fix-uv-lock }}" = "true" ] && [ -f pyproject.toml ] && [ -f uv.lock ]; then
+            uv lock --check
+          fi
+          if [ "${{ inputs.fix-python }}" = "true" ] && [ -f pyproject.toml ]; then
+            if uv run --no-sync python -c "import shutil, sys; sys.exit(0 if shutil.which('ruff') else 1)"; then
+              uv run ruff format --check ${{ inputs.python-paths }}
+            fi
+          fi
+          if [ "${{ inputs.fix-rust }}" = "true" ] && [ -f "${{ inputs.rust-manifest }}" ]; then
+            cargo fmt --manifest-path "${{ inputs.rust-manifest }}" -- --check
+          fi
+
+      - name: Apply fix (sub-pr or direct)
+        if: steps.target.outputs.eligible == 'true' && steps.diff.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.token || github.token }}
+          PR_NUMBER: ${{ steps.target.outputs.pr_number }}
+          HEAD_REF: ${{ steps.target.outputs.head_ref }}
+          FIX_MODE: ${{ inputs.mode }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if [ "$FIX_MODE" = "direct" ]; then
+            git add -A
+            git commit -m "style(autofix): apply CI lint/format/lockfile fixes for #$PR_NUMBER"
+            git push origin "HEAD:$HEAD_REF"
+            exit 0
+          fi
+
+          FIX_BRANCH="autofix/pr-$PR_NUMBER"
+          git checkout -b "$FIX_BRANCH"
+          git add -A
+          git commit -m "style(autofix): apply CI lint/format/lockfile fixes for #$PR_NUMBER"
+          git push --force-with-lease origin "$FIX_BRANCH"
+
+          EXISTING=$(gh pr list --repo "${{ github.repository }}" --base "$HEAD_REF" --head "$FIX_BRANCH" --state open --json number --jq '.[0].number // empty')
+          if [ -z "$EXISTING" ]; then
+            PR_URL=$(gh pr create --repo "${{ github.repository }}" \
+              --base "$HEAD_REF" \
+              --head "$FIX_BRANCH" \
+              --title "style(autofix): fix lint/format/lockfile for #$PR_NUMBER" \
+              --body "Automated lint, formatting, and lockfile fixes verified in CI before merging into \`$HEAD_REF\`.")
+          else
+            PR_URL="$EXISTING"
+          fi
+
+          gh pr merge "$PR_URL" --repo "${{ github.repository }}" --squash --delete-branch

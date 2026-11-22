@@ -1,0 +1,84 @@
+name: Run CI Auto-Fixers
+description: Run deterministic, safe auto-fixers (uv lock, ruff check --fix, ruff format, cargo fmt).
+
+inputs:
+  fix-python:
+    description: Run ruff check --fix and ruff format when Python files exist.
+    required: false
+    default: 'true'
+  fix-uv-lock:
+    description: Run uv lock when uv.lock exists.
+    required: false
+    default: 'true'
+  fix-rust:
+    description: Run cargo fmt when a Cargo.toml manifest exists.
+    required: false
+    default: 'true'
+  python-paths:
+    description: Space-separated Python paths for ruff.
+    required: false
+    default: '.'
+  extras:
+    description: Space-separated extras for uv sync.
+    required: false
+    default: 'dev'
+  rust-manifest:
+    description: Path to Cargo.toml for cargo fmt.
+    required: false
+    default: 'Cargo.toml'
+
+runs:
+  using: composite
+  steps:
+    - name: Set up uv (if Python project)
+      if: (inputs.fix-python == 'true' || inputs.fix-uv-lock == 'true') && hashFiles('pyproject.toml') != ''
+      uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+      with:
+        enable-cache: true
+
+    - name: Refresh uv.lock if out of sync
+      if: inputs.fix-uv-lock == 'true' && hashFiles('pyproject.toml', 'uv.lock') != ''
+      shell: bash
+      run: |
+        set -euo pipefail
+        if ! uv lock --check; then
+          echo "uv.lock is out of sync; regenerating..."
+          uv lock
+        fi
+
+    - name: Run ruff auto-fix and format
+      if: inputs.fix-python == 'true' && hashFiles('pyproject.toml') != ''
+      shell: bash
+      env:
+        UV_EXTRAS: ${{ inputs.extras }}
+        RUFF_PATHS: ${{ inputs.python-paths }}
+      run: |
+        set -euo pipefail
+        args=()
+        if [ -f uv.lock ]; then
+          args+=(--frozen)
+        fi
+        if [ "$UV_EXTRAS" = "all" ]; then
+          args+=(--all-extras)
+        elif [ -n "$UV_EXTRAS" ]; then
+          for extra in $UV_EXTRAS; do
+            args+=(--extra "$extra")
+          done
+        fi
+        uv sync "${args[@]}"
+        if uv run --no-sync python -c "import shutil, sys; sys.exit(0 if shutil.which('ruff') else 1)"; then
+          # Safe fixes only (never --unsafe-fixes) + formatting
+          uv run ruff check --fix $RUFF_PATHS || true
+          uv run ruff format $RUFF_PATHS
+        fi
+
+    - name: Set up Rust and run cargo fmt
+      if: inputs.fix-rust == 'true' && hashFiles(inputs.rust-manifest) != ''
+      uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      with:
+        components: rustfmt
+
+    - name: Format Rust code
+      if: inputs.fix-rust == 'true' && hashFiles(inputs.rust-manifest) != ''
+      shell: bash
+      run: cargo fmt --manifest-path "${{ inputs.rust-manifest }}"
