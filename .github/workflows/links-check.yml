@@ -32,3 +32,4 @@ jobs:
             ${{ inputs.extra-args }}
             ${{ inputs.targets }}
           fail: true
+          failIfEmpty: false

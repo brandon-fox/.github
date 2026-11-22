@@ -1,6 +1,6 @@
 # brandon-fox/.github
 
-Shared GitHub Actions, reusable CI workflows, and community health defaults for personal repositories under `brandon-fox`.
+> **Status:** active — shared GitHub Actions, reusable CI workflows, and community health defaults for personal repositories under [brandon-fox](https://github.com/brandon-fox).
 
 ## Composite Actions
 
@@ -17,4 +17,4 @@ Shared GitHub Actions, reusable CI workflows, and community health defaults for 
 
 ## Independence
 
-All work here is personal and independent of any employer. Licensed under the MIT License.
+All work here is personal and independent of any employer, built on my own time and equipment. Licensed under the MIT License; principles at [First-ADE/PRINCIPLES.md](https://github.com/First-ADE/.github/blob/main/PRINCIPLES.md).
