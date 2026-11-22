@@ -1,0 +1,105 @@
+name: Python CI (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      python-version:
+        description: Python version to test with.
+        required: false
+        type: string
+        default: '3.13'
+      src-dir:
+        description: Source directory to lint and type-check.
+        required: false
+        type: string
+        default: 'src'
+      tests-dir:
+        description: Tests directory.
+        required: false
+        type: string
+        default: 'tests'
+      extras:
+        description: Extras to pass to uv sync (e.g. "all", "dev", or "").
+        required: false
+        type: string
+        default: 'all'
+      cov-fail-under:
+        description: Minimum coverage percentage (0 to disable).
+        required: false
+        type: number
+        default: 85
+      run-ruff:
+        description: Whether to run ruff check and format check.
+        required: false
+        type: boolean
+        default: true
+      run-mypy:
+        description: Whether to run mypy.
+        required: false
+        type: boolean
+        default: true
+
+jobs:
+  ci:
+    name: Python (${{ inputs.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          enable-cache: true
+          python-version: ${{ inputs.python-version }}
+
+      - name: Verify uv.lock sync
+        if: hashFiles('uv.lock') != ''
+        run: uv lock --check
+
+      - name: Sync dependencies
+        env:
+          UV_EXTRAS: ${{ inputs.extras }}
+        run: |
+          set -euo pipefail
+          args=()
+          if [ -f uv.lock ]; then
+            args+=(--frozen)
+          fi
+          if [ "$UV_EXTRAS" = "all" ]; then
+            args+=(--all-extras)
+          elif [ -n "$UV_EXTRAS" ]; then
+            for extra in $UV_EXTRAS; do
+              args+=(--extra "$extra")
+            done
+          fi
+          uv sync "${args[@]}"
+
+      - name: Lint with ruff
+        if: inputs.run-ruff && (hashFiles(format('{0}/**/*.py', inputs.src-dir)) != '')
+        run: |
+          if uv run --no-sync python -c "import shutil, sys; sys.exit(0 if shutil.which('ruff') else 1)"; then
+            uv run ruff check "${{ inputs.src-dir }}" --output-format=github
+            uv run ruff format --check "${{ inputs.src-dir }}"
+          else
+            echo "::notice::ruff not installed in environment, skipping"
+          fi
+
+      - name: Type check with mypy
+        if: inputs.run-mypy && (hashFiles(format('{0}/**/*.py', inputs.src-dir)) != '')
+        run: |
+          if uv run --no-sync python -c "import shutil, sys; sys.exit(0 if shutil.which('mypy') else 1)"; then
+            uv run mypy "${{ inputs.src-dir }}" --ignore-missing-imports
+          else
+            echo "::notice::mypy not installed in environment, skipping"
+          fi
+
+      - name: Run pytest
+        if: hashFiles(format('{0}/**/*.py', inputs.tests-dir)) != ''
+        run: |
+          set -euo pipefail
+          args=("${{ inputs.tests-dir }}" -v --tb=short)
+          if [ "${{ inputs.cov-fail-under }}" -gt 0 ] && uv run --no-sync python -c "import pytest_cov" 2>/dev/null; then
+            args+=(--cov="${{ inputs.src-dir }}" --cov-report=xml --cov-fail-under="${{ inputs.cov-fail-under }}")
+          fi
+          uv run pytest "${args[@]}"
