@@ -1,3 +1,0 @@
-jobs:
-  ade-check:
-    uses: First-ADE/.github/.github/workflows/verify.yml@main

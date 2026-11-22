@@ -1,0 +1,15 @@
+name: Cache ML Weights
+description: Cache HuggingFace and PyTorch model weights keyed on pyproject.toml and uv.lock.
+
+runs:
+  using: composite
+  steps:
+    - name: Cache open-source AI model weights
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          ~/.cache/huggingface/hub
+          ~/.cache/torch/hub
+        key: ${{ runner.os }}-model-weights-${{ hashFiles('pyproject.toml', 'uv.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-model-weights-

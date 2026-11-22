@@ -1,0 +1,50 @@
+name: Setup uv (cached)
+description: Install uv with cache enabled and optionally sync dependencies.
+
+inputs:
+  python-version:
+    description: Optional Python version for uv to use.
+    required: false
+    default: ''
+  extras:
+    description: Space-separated extras to pass to uv sync (e.g. "dev" or "all").
+    required: false
+    default: 'dev'
+  sync:
+    description: Whether to run uv sync after installing uv.
+    required: false
+    default: 'true'
+  frozen:
+    description: Whether to pass --frozen to uv sync.
+    required: false
+    default: 'true'
+
+runs:
+  using: composite
+  steps:
+    - name: Set up uv
+      uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+      with:
+        enable-cache: true
+        python-version: ${{ inputs.python-version }}
+
+    - name: Sync Python dependencies
+      if: inputs.sync == 'true'
+      shell: bash
+      env:
+        UV_EXTRAS: ${{ inputs.extras }}
+        UV_FROZEN: ${{ inputs.frozen }}
+      run: |
+        set -euo pipefail
+        args=()
+        if [ "$UV_FROZEN" = "true" ] && [ -f uv.lock ]; then
+          args+=(--frozen)
+        fi
+        if [ "$UV_EXTRAS" = "all" ]; then
+          args+=(--all-extras)
+        elif [ -n "$UV_EXTRAS" ]; then
+          for extra in $UV_EXTRAS; do
+            args+=(--extra "$extra")
+          done
+        fi
+        uv sync "${args[@]}"

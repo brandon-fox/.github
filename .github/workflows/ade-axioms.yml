@@ -1,0 +1,15 @@
+name: ADE Axioms (Reusable)
+
+on:
+  workflow_call:
+
+jobs:
+  axioms:
+    name: First-ADE axiom validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: First-ADE/.github/.github/actions/ade-axioms@de17a5a93b5b00b8bf073d25299202680a93bd78 # main

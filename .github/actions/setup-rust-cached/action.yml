@@ -1,0 +1,35 @@
+name: Setup Rust (cached)
+description: Set up Rust toolchain with clippy/rustfmt, optional Python for PyO3, and Swatinem/rust-cache.
+
+inputs:
+  python-version:
+    description: Optional Python version to set up for PyO3 builds (empty skips setup-python).
+    required: false
+    default: ''
+  workspaces:
+    description: Workspaces path for Swatinem/rust-cache.
+    required: false
+    default: '.'
+  components:
+    description: Comma-separated Rust toolchain components.
+    required: false
+    default: 'clippy, rustfmt'
+
+runs:
+  using: composite
+  steps:
+    - name: Set up Python for PyO3
+      if: inputs.python-version != ''
+      uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Set up Rust toolchain
+      uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      with:
+        components: ${{ inputs.components }}
+
+    - name: Cache Rust dependencies
+      uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.7.7
+      with:
+        workspaces: ${{ inputs.workspaces }}

@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  axioms:
+    name: First-ADE axiom validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: First-ADE/.github/.github/actions/ade-axioms@de17a5a93b5b00b8bf073d25299202680a93bd78 # main
+
+  links:
+    name: Check README links
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2.9.0
+        with:
+          args: >-
+            --no-progress
+            --exclude 'linkedin\.com'
+            --exclude 'mailto:'
+            README.md SECURITY.md CODE_OF_CONDUCT.md
+          fail: true
+
+  validate-workflows:
+    name: Validate workflows & action pins
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Check pinned action SHAs exist upstream
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          grep -rhoE 'uses: +[A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+@[0-9a-f]{40}' .github \
+            | sed -E 's/^uses: +//' | sort -u > pins.txt
+          missing=0
+          while IFS='@' read -r action sha; do
+            repo=$(echo "$action" | cut -d/ -f1-2)
+            if ! gh api "repos/${repo}/git/commits/${sha}" --silent 2>/dev/null; then
+              echo "::error::${action}@${sha} does not exist in ${repo}"
+              missing=1
+            fi
+          done < pins.txt
+          echo "Checked $(wc -l < pins.txt) pinned actions"
+          exit "$missing"
